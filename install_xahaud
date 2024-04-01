@@ -1,0 +1,199 @@
+#!/bin/bash
+
+# Exit the script on any error
+set -e
+set -x
+
+# Variables
+DOWNLOAD_DIR="/opt/xahaud/downloads"
+BIN_DIR="/opt/xahaud/bin"
+DB_DIR="/opt/xahaud/db"
+LOG_DIR="/opt/xahaud/log"
+ETC_DIR="/opt/xahaud/etc"
+CONFIG_DIR="/etc/opt/xahau"
+VAR_DIR="/var/opt/xahau"
+DOWNLOAD_URL="https://build.xahau.tech/2024.3.12-release%2B790"
+FILE_NAME="2024.3.12-release+790"
+SERVICE_NAME="xahaud.service"
+USER_NAME="xahaud"
+SERVICE_FILE_PATH="/etc/systemd/system/$SERVICE_NAME"
+CONFIG_FILE="$CONFIG_DIR/xahaud.cfg"
+VALIDATORS_FILE="$ETC_DIR/validators-xahau.txt"
+
+# Ensure the xahaud user exists
+if ! id "$USER_NAME" &>/dev/null; then
+    echo "User $USER_NAME does not exist, creating..."
+    sudo useradd -m -s /bin/false "$USER_NAME"
+    echo "User $USER_NAME created."
+fi
+
+# Ensure the existence of required directories
+sudo mkdir -p "$DOWNLOAD_DIR" "$BIN_DIR" "$DB_DIR" "$LOG_DIR" "$ETC_DIR" "$CONFIG_DIR" "$VAR_DIR"
+sudo chown -R "$USER_NAME":"$USER_NAME" "$DB_DIR" "$LOG_DIR" "$ETC_DIR" "$CONFIG_DIR" "$VAR_DIR"
+echo "Ensured directories exist and are owned by $USER_NAME."
+
+# Download the Xahau release
+cd "$DOWNLOAD_DIR"
+echo "Downloading Xahau release..."
+sudo wget "$DOWNLOAD_URL" -O "$FILE_NAME"
+
+# Assign ownership and set the executable permission
+sudo chown "$USER_NAME":"$USER_NAME" "$FILE_NAME"
+sudo chmod 755 "$FILE_NAME"
+
+# Link the downloaded release in the bin directory
+echo "Creating symbolic link in $BIN_DIR for $FILE_NAME from $DOWNLOAD_DIR..."
+sudo rm -f "$BIN_DIR/xahaud"  # Ensure any existing link or file named xahaud is removed
+sudo ln -vfs "../downloads/$FILE_NAME" "$BIN_DIR/xahaud"
+ls -l "$BIN_DIR/xahaud"  # Verify the link was created
+
+# Append /opt/xahaud/bin to the global PATH by creating a script in /etc/profile.d
+echo "Appending /opt/xahaud/bin to the global PATH..."
+sudo bash -c 'echo "export PATH=\$PATH:/opt/xahaud/bin" > /etc/profile.d/xahaud.sh'
+sudo chmod +x /etc/profile.d/xahaud.sh
+
+# Continue with the rest of the script...
+
+# Create configuration files before starting the service
+echo "Creating configuration files..."
+
+# Xahaud configuration
+echo "Creating configuration file at $CONFIG_FILE..."
+sudo -u "$USER_NAME" bash -c "cat <<'EOF' > '$CONFIG_FILE'
+# This is the default configuration file for the xahaud daemon.
+# Any modifications to this will require a restart of the xahaud daemon
+
+[peers_max]
+20
+
+[overlay]
+ip_limit = 1024
+
+[network_id]
+21337
+
+[server]
+port_rpc_admin_local
+port_peer
+port_ws_admin_local
+port_ws_public
+port_rpc_public
+
+[port_rpc_admin_local]
+port = 5009
+ip = 127.0.0.1
+admin = 127.0.0.1
+protocol = http
+
+[port_peer]
+port = 21337
+ip = 0.0.0.0
+protocol = peer
+
+[port_ws_admin_local]
+port = 6009
+ip = 127.0.0.1
+admin = 127.0.0.1
+protocol = ws
+
+[port_ws_public]
+port = 6008
+ip = 0.0.0.0
+protocol = ws
+secure_gateway = 127.0.0.1
+limit = 50000
+send_queue_limit = 20000
+websocket_ping_frequency = 10
+
+[port_rpc_public]
+port = 6007
+ip = 0.0.0.0
+protocol = http
+secure_gateway = 127.0.0.1
+
+[node_size]
+medium
+
+[node_db]
+type=NuDB
+path=$DB_DIR/nudb
+advisory_delete=0
+
+[database_path]
+$DB_DIR
+
+[debug_logfile]
+$LOG_DIR/debug.log
+
+[sntp_servers]
+time.windows.com
+time.apple.com
+time.nist.gov
+pool.ntp.org
+
+[validators_file]
+$ETC_DIR/validators-xahau.txt
+
+[rpc_startup]
+{ "command": "log_level", "severity": "warn" }
+
+[ssl_verify]
+0
+
+[peer_private]
+0
+
+[ips_fixed]
+bacab.alloy.ee 21337
+
+# For validators only
+[voting]
+account_reserve = 1000000
+owner_reserve = 200000
+
+# Uncomment for Full History
+#[ledger_history]
+#full
+EOF"
+echo "Xahaud configuration file created."
+
+# Validators configuration
+sudo -u "$USER_NAME" tee "$VALIDATORS_FILE" > /dev/null <<EOF
+[validator_list_sites]
+https://vl.xahau.org
+
+[validator_list_keys]
+EDA46E9C39B1389894E690E58914DC1029602870370A0993E5B87C4A24EAF4A8E8
+
+[import_vl_keys]
+ED45D1840EE724BE327ABE9146503D5848EFD5F38B6D5FEDE71E80ACCE5E6E738B
+EOF
+echo "Validators configuration file created."
+
+# Create and configure the xahaud service file
+echo "Creating the $SERVICE_NAME file..."
+sudo tee "$SERVICE_FILE_PATH" > /dev/null <<EOF
+[Unit]
+Description=Xahau Service
+After=network.target
+
+[Service]
+User=$USER_NAME
+ExecStart=$BIN_DIR/xahaud
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+EOF
+echo "$SERVICE_NAME file created."
+# Reload systemd
+echo "Reloading systemd and enabling $SERVICE_NAME..."
+sudo systemctl daemon-reload
+sudo systemctl enable "$SERVICE_NAME"
+
+# Start the service
+echo "Starting $SERVICE_NAME..."
+sudo systemctl start "$SERVICE_NAME"
+echo "$SERVICE_NAME started."
+
+echo "Installation and configuration completed successfully."
